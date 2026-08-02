@@ -1,0 +1,22 @@
+{
+  "name": "bot-wa-conqueror",
+  "version": "1.0.0",
+  "description": "Bot WhatsApp dengan fitur lengkap dan pairing code",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "@adiwajshing/keyed-db": "^0.2.4",
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "axios": "^1.7.9",
+    "ytdl-core": "^4.11.5",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
