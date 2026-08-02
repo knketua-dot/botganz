@@ -1,0 +1,17 @@
+{
+  "name": "bot-conqueror",
+  "version": "2.0.0",
+  "description": "Bot WhatsApp all-in-one by Ganz",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "axios": "^1.7.9",
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "sharp": "^0.33.5",
+    "ytdl-core": "^4.11.5"
+  }
+}
