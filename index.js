@@ -1,451 +1,334 @@
-import './settings.js';
-import fs from 'fs';
-import os from 'os';
-import dns from 'dns';
-import pino from 'pino';
-import path from 'path';
-import axios from 'axios';
-import chalk from 'chalk';
-import cron from 'node-cron';
-import readline from 'readline';
-import { Boom } from '@hapi/boom';
-import NodeCache from 'node-cache';
-import { fileURLToPath } from 'url';
-import qrcode from 'qrcode-terminal';
-import moment from 'moment-timezone';
-import { createRequire } from 'module';
-import { parsePhoneNumber } from 'awesome-phonenumber';
-import WAConnection, { useMultiFileAuthState, Browsers, DisconnectReason, makeCacheableSignalKeyStore, fetchLatestWaWebVersion } from 'baileys';
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+  downloadMediaMessage
+} from "@whiskeysockets/baileys"
+import pino from "pino"
+import chalk from "chalk"
+import settings from "./settings.js"
 
-import { setupDashboard } from './src/server.js';
-import { assertInstalled, customHttpsAgent } from './lib/function.js';
-import { dataBase, cmdDel, checkStatus, checkExpired } from './src/database.js';
-import { GroupParticipantsUpdate, MessagesUpsert, Solving } from './src/message.js';
+const logger = pino({ level: "silent" })
 
-const require = createRequire(import.meta.url);
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+async function startG4nzz() {
+  const { state, saveCreds } = await useMultiFileAuthState("./session")
+  const { version } = await fetchLatestBaileysVersion()
 
-const print = (label, value) => console.log(`${chalk.green.bold('║')} ${chalk.cyan.bold(label.padEnd(16))}${chalk.yellow.bold(':')} ${value}`);
-const pairingCode = process.argv.includes('--qr') ? false : process.argv.includes('--pairing-code') || global.pairing_code;
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const question = (text) => new Promise((resolve) => rl.question(text, resolve));
-const tempDir = path.join(__dirname, 'database/temp');
-const time_now = new Date();
-const time_end = 60000 - (time_now.getSeconds() * 1000 + time_now.getMilliseconds());
-let pairingStarted = false;
-let setupServer = null;
-let phoneNumber;
+  const sock = makeWASocket({
+    version,
+    logger,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger)
+    },
+    printQRInTerminal: !settings.usePairingCode,
+    generateHighQualityLinkPreview: true,
+    syncFullHistory: false
+  })
 
-const userInfoSyt = () => {
-	try {
-		return os.userInfo().username;
-	} catch (e) {
-		return process.env.USER || process.env.USERNAME || 'unknown';
-	}
-};
+  // ========== PAIRING CODE ==========
+  if (settings.usePairingCode && !sock.authState.creds.registered) {
+    const phoneNumber = settings.botNumber.replace(/[^0-9]/g, "")
+    setTimeout(async () => {
+      try {
+        const code = await sock.requestPairingCode(phoneNumber)
+        console.log(chalk.green.bold("\n┌────────────────────────────────────┐"))
+        console.log(chalk.green.bold("│         G4nzz BOT PAIRING         │"))
+        console.log(chalk.green.bold("└────────────────────────────────────┘"))
+        console.log(chalk.yellow(`\nNomor Bot   : ${phoneNumber}`))
+        console.log(chalk.cyan.bold(`Pairing Code: ${code}\n`))
+        console.log(chalk.white("Cara pakai:"))
+        console.log("1. Buka WhatsApp")
+        console.log("2. Perangkat Tertaut → Tautkan perangkat")
+        console.log("3. Pilih 'Tautkan dengan nomor telepon'")
+        console.log("4. Masukkan kode di atas\n")
+      } catch (e) {
+        console.log(chalk.red("Gagal request pairing code:"), e.message)
+      }
+    }, 3000)
+  }
 
-try {
-	dns.setServers(['8.8.8.8', '1.1.1.1']);
-	console.log(chalk.yellowBright('[SYSTEM] Custom DNS Google & Cloudflare.'));
-} catch (e) {
-	console.log(chalk.yellowBright('[SYSTEM] failed to custom DNS:'), e.message);
+  sock.ev.on("creds.update", saveCreds)
+
+  sock.ev.on("connection.update", (update) => {
+    const { connection, lastDisconnect } = update
+    if (connection === "close") {
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
+      console.log(chalk.red("Koneksi terputus..."), shouldReconnect ? "mencoba reconnect" : "logout")
+      if (shouldReconnect) startG4nzz()
+    } else if (connection === "open") {
+      console.log(chalk.green.bold("\n✅ G4nzz Bot berhasil terhubung!\n"))
+    }
+  })
+
+  // ========== MESSAGE HANDLER ==========
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    const m = messages[0]
+    if (!m.message || m.key.fromMe) return
+
+    const from = m.key.remoteJid
+    const isGroup = from.endsWith("@g.us")
+    const sender = isGroup ? (m.key.participant || m.participant) : from
+    const pushName = m.pushName || "User"
+
+    const body =
+      m.message.conversation ||
+      m.message.extendedTextMessage?.text ||
+      m.message.imageMessage?.caption ||
+      m.message.videoMessage?.caption ||
+      ""
+
+    const prefix = settings.prefix.find(p => body.startsWith(p)) || ""
+    const command = body.slice(prefix.length).trim().split(/\s+/)[0].toLowerCase()
+    const args = body.slice(prefix.length + command.length).trim().split(/\s+/)
+    const text = args.join(" ").trim()
+    const q = m.message?.extendedTextMessage?.contextInfo?.quotedMessage
+
+    const isOwner = settings.owner.map(n => n + "@s.whatsapp.net").includes(sender)
+
+    const reply = async (teks) => {
+      await sock.sendMessage(from, { text: teks }, { quoted: m })
+    }
+
+    try {
+      switch (command) {
+
+        case "menu":
+        case "help":
+        case "m":
+          {
+            const menu = `
+╭─────────────────────────╮
+│     ⚡ *G4NZZ BOT* ⚡     │
+╰─────────────────────────╯
+
+Halo *${pushName}* 👋
+Prefix : ${settings.prefix.join(" / ")}
+
+┌─「 *Main Menu* 」
+│ • menu
+│ • ping
+│ • runtime
+│ • info
+│ • owner
+└───────────────
+
+┌─「 *Fun* 」
+│ • rate <teks>
+│ • jodoh <nama1>|<nama2>
+│ • cek <sifat>
+│ • kapankah <teks>
+│ • bisakah <teks>
+│ • apakah <teks>
+└───────────────
+
+┌─「 *Tools* 」
+│ • sticker / s
+│ • toimg
+│ • tts <teks>
+│ • translate <teks>
+└───────────────
+
+┌─「 *Group* 」
+│ • hidetag <teks>
+│ • tagall
+└───────────────
+
+┌─「 *Owner* 」
+│ • broadcast <pesan>
+└───────────────
+
+╭─────────────────────────╮
+│   Bot by *G4nzz* ❤️     │
+╰─────────────────────────╯`
+            await reply(menu)
+          }
+          break
+
+        case "ping":
+          {
+            const start = Date.now()
+            await reply("Pong!")
+            const end = Date.now()
+            await reply(`⚡ *${end - start} ms*`)
+          }
+          break
+
+        case "runtime":
+          {
+            const uptime = process.uptime()
+            const h = Math.floor(uptime / 3600)
+            const mnt = Math.floor((uptime % 3600) / 60)
+            const s = Math.floor(uptime % 60)
+            await reply(`⏱️ *Runtime*\n${h} jam ${mnt} menit ${s} detik`)
+          }
+          break
+
+        case "info":
+          {
+            await reply(`🤖 *G4nzz Bot*\nVersi: 1.1.0\nBase: Baileys\nOwner: ${settings.ownerName}\n\nBot ringan & custom dengan Pairing Code.`)
+          }
+          break
+
+        case "owner":
+          {
+            const vcard = `BEGIN:VCARD
+VERSION:3.0
+N:;${settings.ownerName};;;
+FN:${settings.ownerName}
+TEL;type=CELL;type=VOICE;waid=\( {settings.owner[0]}:+ \){settings.owner[0]}
+END:VCARD`
+            await sock.sendMessage(from, {
+              contacts: {
+                displayName: settings.ownerName,
+                contacts: [{ vcard }]
+              }
+            }, { quoted: m })
+          }
+          break
+
+        case "rate":
+          {
+            if (!text) return reply(`Contoh: ${prefix}rate aku ganteng`)
+            const rate = Math.floor(Math.random() * 101)
+            await reply(`📊 Rating *\( {text}* adalah * \){rate}/100*`)
+          }
+          break
+
+        case "jodoh":
+          {
+            if (!text.includes("|")) return reply(`Contoh: ${prefix}jodoh Budi|Siti`)
+            const [n1, n2] = text.split("|")
+            const percent = Math.floor(Math.random() * 101)
+            await reply(`💘 Kecocokan *\( {n1.trim()}* & * \){n2.trim()}*\n\nHasil: *${percent}%*`)
+          }
+          break
+
+        case "cek":
+          {
+            if (!text) return reply(`Contoh: ${prefix}cek tolol`)
+            const hasil = Math.floor(Math.random() * 101)
+            await reply(`🔍 Hasil cek *\( {text}* kamu adalah * \){hasil}%*`)
+          }
+          break
+
+        case "kapankah":
+          {
+            if (!text) return reply(`Contoh: ${prefix}kapankah aku kaya`)
+            const jawaban = ["Besok", "Lusa", "Minggu depan", "Bulan depan", "Tahun depan", "Tidak akan pernah", "Dalam waktu dekat", "Entah kapan"]
+            const random = jawaban[Math.floor(Math.random() * jawaban.length)]
+            await reply(`❓ *Kapankah \( {text}?*\n\nJawaban: * \){random}*`)
+          }
+          break
+
+        case "bisakah":
+          {
+            if (!text) return reply(`Contoh: ${prefix}bisakah aku jadi sukses`)
+            const jawaban = ["Bisa", "Tidak bisa", "Mungkin bisa", "Bisa banget", "Sulit", "Coba saja dulu", "Mustahil"]
+            const random = jawaban[Math.floor(Math.random() * jawaban.length)]
+            await reply(`❓ *Bisakah \( {text}?*\n\nJawaban: * \){random}*`)
+          }
+          break
+
+        case "apakah":
+          {
+            if (!text) return reply(`Contoh: ${prefix}apakah aku ganteng`)
+            const jawaban = ["Ya", "Tidak", "Mungkin", "Sangat mungkin", "Tidak mungkin", "Bisa jadi", "Rahasia"]
+            const random = jawaban[Math.floor(Math.random() * jawaban.length)]
+            await reply(`❓ *Apakah \( {text}?*\n\nJawaban: * \){random}*`)
+          }
+          break
+
+        case "tts":
+          {
+            if (!text) return reply(`Contoh: ${prefix}tts Halo semua`)
+            await reply(`🔊 TTS: *${text}*`)
+          }
+          break
+
+        case "translate":
+        case "tr":
+          {
+            if (!text) return reply(`Contoh: ${prefix}translate Hello`)
+            await reply(`🌐 Translate:\n${text}`)
+          }
+          break
+
+        case "sticker":
+        case "s":
+        case "stiker":
+          {
+            const isImage = m.message?.imageMessage || q?.imageMessage
+            if (!isImage) return reply("Kirim gambar dengan caption *sticker* atau reply gambar")
+            await reply(settings.mess.wait)
+            try {
+              const media = await downloadMediaMessage(m, "buffer", {}, { logger, reuploadRequest: sock.updateMediaMessage })
+              await sock.sendMessage(from, { image: media, caption: "✅ Gambar diterima" }, { quoted: m })
+            } catch {
+              await reply("Gagal memproses gambar")
+            }
+          }
+          break
+
+        case "toimg":
+          {
+            if (!q?.stickerMessage) return reply("Reply sticker dengan perintah *toimg*")
+            await reply(settings.mess.wait)
+            try {
+              const media = await downloadMediaMessage({ message: q }, "buffer", {}, { logger, reuploadRequest: sock.updateMediaMessage })
+              await sock.sendMessage(from, { image: media, caption: "✅ Convert sticker → image" }, { quoted: m })
+            } catch {
+              await reply("Gagal convert sticker")
+            }
+          }
+          break
+
+        case "hidetag":
+        case "h":
+          {
+            if (!isGroup) return reply(settings.mess.group)
+            if (!text) return reply(`Contoh: ${prefix}hidetag Halo semua`)
+            const groupMeta = await sock.groupMetadata(from)
+            await sock.sendMessage(from, {
+              text: text,
+              mentions: groupMeta.participants.map(p => p.id)
+            })
+          }
+          break
+
+        case "tagall":
+          {
+            if (!isGroup) return reply(settings.mess.group)
+            const groupMeta = await sock.groupMetadata(from)
+            let teks = `📢 *Tag All*\n\n`
+            for (let mem of groupMeta.participants) {
+              teks += `• @${mem.id.split("@")[0]}\n`
+            }
+            await sock.sendMessage(from, {
+              text: teks,
+              mentions: groupMeta.participants.map(p => p.id)
+            }, { quoted: m })
+          }
+          break
+
+        case "broadcast":
+        case "bc":
+          {
+            if (!isOwner) return reply(settings.mess.owner)
+            if (!text) return reply("Masukkan pesan broadcast!")
+            await reply("✅ Fitur broadcast siap dikembangkan")
+          }
+          break
+
+        default:
+          break
+      }
+    } catch (err) {
+      console.error(err)
+      await reply(settings.mess.error)
+    }
+  })
 }
 
-// Fetch Api
-global.fetchApi = async (endpoint = '/', data = {}, options = {}) => {
-	return new Promise(async (resolve, reject) => {
-		try {
-			const apiList = Object.keys(global.APIs);
-			if (options.api !== undefined) {
-				if (typeof options.api !== 'number' || options.api < 1 || options.api > apiList.length) {
-					return reject(new Error(`[Fetch Error] Parameter { api: ${options.api} } tidak terdaftar. Harap gunakan angka 1 hingga ${apiList.length}.`));
-				}
-			}
-			const apiName = typeof options.api === 'number' ? apiList[options.api - 1] : options.name;
-			const base = apiName ? (global.APIs[apiName] || apiName) : global.APIs.naze;
-			const apikey = global.APIKeys[base] || '';
-			let method = (options.method || 'GET').toUpperCase();
-			let url = base + endpoint;
-			let payload = null;
-			let headers = options.headers || { 'user-agent': 'Mozilla/5.0 (Linux; Android 15)' };
-			const isForm = options.form || data instanceof FormData || (data && typeof data.getHeaders === 'function');
-			if (isForm) {
-				payload = data;
-				method = 'POST';
-				headers = { ...(options.headers?.['Authorization'] ? {} : { apikey }), ...headers, ...data.getHeaders() };
-			} else if (method !== 'GET') {
-				payload = { ...data, ...(options.headers?.['Authorization'] ? {} : { apikey }) };
-				headers['content-type'] = 'application/json';
-			} else {
-				url += '?' + new URLSearchParams({ ...data, apikey }).toString();
-			}
-			const res = await axios({
-				method, url, data: payload,
-				headers, httpsAgent: customHttpsAgent,
-				responseType: options.stream ? 'stream' : (options.buffer ? 'arraybuffer' : options.responseType || options.type || 'json'),
-			});
-			if (options.stream) {
-				let ext = options.ext;
-				if (typeof options.stream !== 'string' && !ext) {
-					const contentDisp = res.headers['content-disposition'];
-					const contentType = res.headers['content-type'];
-					if (contentDisp && contentDisp.includes('filename=')) {
-						const match = contentDisp.match(/filename="?([^"]+)"?/);
-						if (match && match[1]) {
-							ext = match[1].split('.').pop();
-						}
-					}
-					if (!ext && contentType) {
-						ext = contentType.split('/')[1]?.split(';')[0];
-						if (ext === 'jpeg') ext = 'jpg';
-					}
-					ext = ext || 'tmp';
-				}
-				let streamPath = typeof options.stream === 'string' ? options.stream : path.join(process.cwd(), 'database/temp', 'temp-' + Date.now() + '.' + ext);
-				const writeStream = fs.createWriteStream(streamPath);
-				res.data.pipe(writeStream);
-				writeStream.on('finish', () => resolve(streamPath));
-				writeStream.on('error', reject);
-			} else {
-				resolve(options.buffer ? Buffer.from(res.data) : res.data);
-			}
-		} catch (e) {
-			reject(e);
-		}
-	});
-};
-
-const storeDB = dataBase(global.tempatStore);
-const database = dataBase(global.tempatDB);
-const msgRetryCounterCache = new NodeCache({ stdTTL: 60 * 60, useClones: false });
-
-if (fs.existsSync(tempDir)) {
-	fs.readdirSync(tempDir).forEach(file => {
-		fs.unlinkSync(path.join(tempDir, file));
-	});
-	console.log(chalk.greenBright('[SYSTEM] Temp folder cleared successfully!'));
-} else {
-	fs.mkdirSync(tempDir, { recursive: true });
-}
-
-assertInstalled(process.platform === 'win32' ? 'where ffmpeg' : 'command -v ffmpeg', 'FFmpeg', 0);
-console.log(chalk.greenBright('✅ All external dependencies are satisfied'));
-console.log(chalk.green.bold(`╔═════[${`${chalk.cyan(userInfoSyt())}@${chalk.cyan(os.hostname())}`}]═════`));
-print('OS', `${os.platform()} ${os.release()} ${os.arch()}`);
-print('Uptime', `${Math.floor(os.uptime() / 3600)} h ${Math.floor((os.uptime() % 3600) / 60)} m`);
-print('Shell', process.env.SHELL || process.env.COMSPEC || 'unknown');
-print('CPU', os.cpus()[0]?.model.trim() || 'unknown');
-print('Memory', `${(os.freemem()/1024/1024).toFixed(0)} MiB / ${(os.totalmem()/1024/1024).toFixed(0)} MiB`);
-print('Script version', `v${require('./package.json').version}`);
-print('Node.js', process.version);
-print('Baileys', `v${require('./package.json').dependencies.baileys}`);
-print('Date & Time', new Date().toLocaleString('en-US', { timeZone: 'Asia/Jakarta', hour12: false }));
-console.log(chalk.green.bold('╚' + ('═'.repeat(30))));
-
-async function startGanzBot() {
-	try {
-		const loadData = await database.read();
-		const storeLoadData = await storeDB.read();
-		if (!loadData || Object.keys(loadData).length === 0) {
-			global.db = {
-				hit: {},
-				set: {},
-				cmd: {},
-				store: {},
-				users: {},
-				game: {},
-				groups: {},
-				database: {},
-				premium: [],
-				sewa: [],
-				...(loadData || {}),
-			};
-			await database.write(global.db);
-		} else {
-			global.db = loadData;
-		}
-		if (!storeLoadData || Object.keys(storeLoadData).length === 0) {
-			global.store = {
-				contacts: {},
-				presences: {},
-				messages: {},
-				groupMetadata: {},
-				...(storeLoadData || {}),
-			};
-			await storeDB.write(global.store);
-		} else {
-			global.store = storeLoadData;
-		}
-
-		global.loadMessage = function (remoteJid, id) {
-			const messages = store.messages?.[remoteJid]?.array;
-			if (!messages) return null;
-			return messages.find(msg => msg?.key?.id === id) || null;
-		};
-
-		if (!global._dbInterval) {
-			global._dbInterval = setInterval(async () => {
-				if (global.db) await database.write(global.db);
-				if (global.store) await storeDB.write(global.store);
-			}, 30 * 1000);
-		}
-	} catch (e) {
-		console.log(e);
-		process.exit(1);
-	}
-
-	const level = pino({ level: 'silent' });
-	const { version } = await fetchLatestWaWebVersion();
-	if (pairingCode && !phoneNumber && !fs.existsSync('./ganz_session/creds.json')) {
-		fs.rmSync('./ganz_session', { recursive: true, force: true });
-		async function getPhoneNumber() {
-			phoneNumber = global.number_bot ? global.number_bot : process.env.BOT_NUMBER || await question('Please type your WhatsApp number : ');
-			phoneNumber = phoneNumber.replace(/[^0-9]/g, '');
-			if (!parsePhoneNumber('+' + phoneNumber).valid && phoneNumber.length < 6) {
-				console.log(chalk.bgBlack(chalk.redBright('Start with your Country WhatsApp code') + chalk.whiteBright(',') + chalk.greenBright(' Example : 62xxx')));
-				await getPhoneNumber();
-			}
-		}
-		await getPhoneNumber();
-		console.log('Phone number captured. Waiting for Connection...\n' + chalk.blueBright('Estimated time: around 2 ~ 5 minutes'));
-	}
-	const { state, saveCreds } = await useMultiFileAuthState('ganz_session');
-	const getMessage = async (key) => {
-		if (global.store) {
-			const msg = await global.loadMessage(key.remoteJid, key.id);
-			return msg?.message || '';
-		}
-		return {
-			conversation: 'Halo Saya Ganz Bot'
-		};
-	};
-
-	// Connector
-	const ganz = WAConnection({
-		version,
-		logger: level,
-		getMessage,
-		syncFullHistory: false,
-		maxMsgRetryCount: 15,
-		msgRetryCounterCache,
-		retryRequestDelayMs: 10,
-		defaultQueryTimeoutMs: 0,
-		connectTimeoutMs: 60000,
-		keepAliveIntervalMs: 30000,
-		browser: Browsers.ubuntu('Chrome'),
-		generateHighQualityLinkPreview: false,
-		transactionOpts: {
-			maxCommitRetries: 10,
-			delayBetweenTriesMs: 10,
-		},
-		appStateMacVerification: {
-			patch: true,
-			snapshot: true,
-		},
-		auth: {
-			creds: state.creds,
-			keys: makeCacheableSignalKeyStore(state.keys, level),
-		},
-	});
-
-	await Solving(ganz, global.store);
-
-	ganz.ev.on('creds.update', saveCreds);
-
-	ganz.ev.on('connection.update', async (update) => {
-		const { qr, connection, lastDisconnect, isNewLogin, receivedPendingNotifications } = update;
-		if ((connection === 'connecting' || !!qr) && pairingCode && phoneNumber && !ganz.authState.creds.registered && !pairingStarted) {
-			pairingStarted = true;
-			setTimeout(async () => {
-				try {
-					console.log('Requesting Pairing Code...');
-					let code = await ganz.requestPairingCode(phoneNumber);
-					console.log(chalk.blue('Your Pairing Code :'), chalk.green(code), '\n', chalk.yellow('Expires in 15 seconds'));
-				} catch (err) {
-					console.log(chalk.redBright('[ERROR] Failed to retrieve the Pairing Code:'), err.message);
-					pairingStarted = false;
-				}
-			}, 3000);
-		}
-		if (connection === 'close') {
-			pairingStarted = false;
-			const reason = new Boom(lastDisconnect?.error)?.output.statusCode;
-			if (reason === DisconnectReason.connectionLost) {
-				console.log('Connection to Server Lost, Attempting to Reconnect...');
-				startGanzBot();
-			} else if (reason === DisconnectReason.connectionClosed) {
-				console.log('Connection closed, Attempting to Reconnect...');
-				startGanzBot();
-			} else if (reason === DisconnectReason.restartRequired) {
-				console.log('Restart Required...');
-				startGanzBot();
-			} else if (reason === DisconnectReason.timedOut) {
-				console.log('Connection Timed Out, Attempting to Reconnect...');
-				startGanzBot();
-			} else if (reason === DisconnectReason.badSession) {
-				console.log('Delete Session and Scan again...');
-				startGanzBot();
-			} else if (reason === DisconnectReason.connectionReplaced) {
-				console.log('Close current Session first...');
-			} else if (reason === DisconnectReason.loggedOut) {
-				console.log('Scan again and Run...');
-				fs.rmSync('./ganz_session', { recursive: true, force: true });
-				process.exit(0);
-			} else if (reason === DisconnectReason.forbidden) {
-				console.log('Connection Failure, Scan again and Run...');
-				fs.rmSync('./ganz_session', { recursive: true, force: true });
-				process.exit(1);
-			} else if (reason === DisconnectReason.multideviceMismatch) {
-				console.log('Scan again...');
-				fs.rmSync('./ganz_session', { recursive: true, force: true });
-				process.exit(0);
-			} else {
-				ganz.end(`Unknown DisconnectReason : ${reason}|${connection}`);
-			}
-		}
-		if (connection == 'open') {
-			console.log('Connected to : ' + JSON.stringify(ganz.user, null, 2));
-			let botNumber = await ganz.decodeJid(ganz.user.id);
-			if (global.db?.set[botNumber] && !global.db?.set[botNumber]?.join) {
-				if (global.my?.ch && global.my.ch.length > 0 && global.my.ch.includes('@newsletter')) {
-					await ganz.newsletterMsg(global.my.ch, { type: 'follow' }).catch(e => {});
-					global.db.set[botNumber].join = true;
-				}
-			}
-		}
-		if (qr) {
-			if (!pairingCode) qrcode.generate(qr, { small: true });
-		}
-		if (isNewLogin) console.log(chalk.green('[INFO] New device login detected...'));
-		if (receivedPendingNotifications == 'true') {
-			console.log(chalk.green('[INFO] Please wait About 1 Minute...'));
-			ganz.ev.flush();
-		}
-	});
-
-	ganz.ev.on('call', async (call) => {
-		let botNumber = await ganz.decodeJid(ganz.user.id);
-		if (global.db?.set[botNumber]?.anticall) {
-			for (let id of call) {
-				if (id.status === 'offer') {
-					let msg = await ganz.sendMessage(id.from, { text: `Saat Ini, Kami Tidak Dapat Menerima Panggilan ${id.isVideo ? 'Video' : 'Suara'}.\nJika @${id.from.split('@')[0]} Memerlukan Bantuan, Silakan Hubungi Owner :)`, mentions: [id.from]});
-					await ganz.sendContact(id.from, global.owner, msg);
-					await ganz.rejectCall(id.id, id.from);
-				}
-			}
-		}
-	});
-
-	ganz.ev.on('messages.upsert', async (message) => {
-		await MessagesUpsert(ganz, message, global.store);
-	});
-
-	ganz.ev.on('group-participants.update', async (update) => {
-		await GroupParticipantsUpdate(ganz, update, global.store);
-	});
-
-	ganz.ev.on('groups.update', (update) => {
-		for (const n of update) {
-			if (global.store.groupMetadata[n.id]) {
-				Object.assign(global.store.groupMetadata[n.id], n);
-			} else global.store.groupMetadata[n.id] = n;
-		}
-	});
-
-	ganz.ev.on('presence.update', (update) => {
-		const { id, presences } = update;
-		global.store.presences[id] = global.store.presences?.[id] || {};
-		Object.assign(global.store.presences[id], presences);
-	});
-
-	// Reset Limit & Backup
-	cron.schedule('00 00 * * *', async () => {
-		cmdDel(global.db.hit);
-		console.log(chalk.cyan('[INFO] Reseted Limit Users'));
-		let user = Object.keys(global.db.users);
-		let botNumber = await ganz.decodeJid(ganz.user.id);
-		for (let jid of user) {
-			const limitUser = global.db.users[jid].vip ? global.limit.vip : checkStatus(jid, global.db.premium) ? global.limit.premium : global.limit.free;
-			if (global.db.users[jid].limit < limitUser) global.db.users[jid].limit = limitUser;
-		}
-		if (global.db?.set[botNumber]?.autobackup) {
-			let datanya = './database/' + global.tempatDB;
-			if (global.tempatDB.startsWith('mongodb')) {
-				datanya = './database/backup_database.json';
-				fs.writeFileSync(datanya, JSON.stringify(global.db, null, 2), 'utf-8');
-			}
-			for (let o of global.ownerNumber || []) {
-				try {
-					await ganz.sendMessage(o, { document: fs.readFileSync(datanya), mimetype: 'application/json', fileName: new Date().toISOString().replace(/[:.]/g, '-') + '_database.json' });
-					console.log(chalk.cyanBright(`[AUTO BACKUP] Backup success send to ${o}`));
-				} catch (error) {
-					console.error(chalk.cyanBright(`[AUTO BACKUP] Failed to Sending Backup ${o}:`, error));
-				}
-			}
-		}
-	}, {
-		scheduled: true,
-		timezone: global.timezone
-	});
-
-	// Waktu Sholat
-	if (!global.intervalSholat) global.intervalSholat = null;
-	if (!global.waktusholat) global.waktusholat = {};
-	if (global.intervalSholat) clearInterval(global.intervalSholat); 
-	setTimeout(() => {
-		global.intervalSholat = setInterval(async() => {
-			const sekarang = moment.tz(global.timezone);
-			const jamSholat = sekarang.format('HH:mm');
-			const hariIni = sekarang.format('YYYY-MM-DD');
-			const detik = sekarang.format('ss');
-			if (detik !== '00') return;
-			for (const [sholat, waktu] of Object.entries(global.jadwalSholat || {})) {
-				if (jamSholat === waktu && global.waktusholat[sholat] !== hariIni) {
-					global.waktusholat[sholat] = hariIni;
-					for (const [idnya, settings] of Object.entries(global.db.groups || {})) {
-						if (settings.waktusholat) {
-							await ganz.sendMessage(idnya, { text: `Waktu *${sholat}* telah tiba, ambilah air wudhu dan segeralah shalat🙂.\n\n*${waktu.slice(0, 5)}*\n_untuk wilayah ${global.timezone} dan sekitarnya._` }, { ephemeralExpiration: global.store?.messages[idnya]?.array?.slice(-1)[0]?.metadata?.ephemeralDuration || 0 }).catch(e => {});
-						}
-					}
-				}
-			}
-		}, 60000);
-	}, time_end);
-
-	if (!global._dbPresence) {
-		if (global?.db?.premium) checkExpired(global.db.premium);
-		if (global?.db?.sewa && ganz?.user?.id) checkExpired(global.db.sewa, ganz);
-		global._dbPresence = setInterval(async () => {
-			if (ganz?.user?.id) await ganz.sendPresenceUpdate('available', ganz.decodeJid(ganz.user.id)).catch(e => {});
-		}, 60 * 60 * 1000);
-	}
-
-	if (!setupServer && database && ganz) {
-		setupServer = await setupDashboard(database, storeDB, ganz);
-	}
-
-	return ganz;
-}
-
-startGanzBot();
-
-const cleanup = async (signal) => {
-	console.log(chalk.greenBright(`[SYSTEM] Received ${signal}. Menyimpan database...`));
-	if (global.db) await database.write(global.db);
-	if (global.store) await storeDB.write(global.store);
-	console.log('Menutup sistem. Exiting...');
-	process.exit(0);
-};
-
-process.on('uncaughtException', function (err) {
-  console.error(chalk.redBright('[UNCAUGHT EXCEPTION]'), err);
-});
-
-process.on('unhandledRejection', function (err) {
-  console.error(chalk.redBright('[UNHANDLED REJECTION]'), err);
-});
-
-process.on('SIGINT', () => cleanup('SIGINT'));
-process.on('SIGTERM', () => cleanup('SIGTERM'));
-process.on('exit', () => cleanup('exit'));
+startG4nzz()
