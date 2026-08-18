@@ -1,0 +1,19 @@
+# G4nzz Bot
+
+Bot WhatsApp ringan dengan **Pairing Code**.
+
+## Fitur
+- Pairing Code (bukan QR)
+- Menu modern
+- Fun commands
+- Group tools (hidetag, tagall)
+- Auto reconnect
+
+## Install di Termux
+
+```bash
+pkg update && pkg upgrade -y
+pkg install git nodejs -y
+git clone https://github.com/USERNAME/G4nzz
+cd G4nzz
+npm install
