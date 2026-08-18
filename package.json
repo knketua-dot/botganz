@@ -1,7 +1,7 @@
 {
   "name": "g4nzz-bot",
   "version": "1.1.0",
-  "description": "G4nzz WhatsApp Bot - Lightweight & Custom Bot with Pairing Code",
+  "description": "G4nzz WhatsApp Bot - Lightweight Bot with Pairing Code",
   "main": "index.js",
   "type": "module",
   "scripts": {
