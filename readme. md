@@ -14,6 +14,6 @@ Bot WhatsApp ringan dengan **Pairing Code**.
 ```bash
 pkg update && pkg upgrade -y
 pkg install git nodejs -y
-git clone https://github.com/USERNAME/G4nzz
-cd G4nzz
+git clone https://github.com/knketua-dot/botganz
+cd botganz
 npm install
